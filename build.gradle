@@ -1,0 +1,349 @@
+/*
+ * MIT License
+ * 
+ * Copyright (c) 2020 yaoyorozu
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+// Currently, `plugins {}` block can only be used in the top of build.script,
+// so it is NOT declare `subproject {}` block.
+//
+// https://docs.gradle.org/current/userguide/plugins.html#sec:build_scripts_only
+buildscript {
+    repositories {
+        maven {
+            url 'https://plugins.gradle.org/m2/'
+        }
+    }
+
+    dependencies {
+        classpath 'com.github.spotbugs:spotbugs-gradle-plugin:2.0.1'
+        classpath 'io.qameta.allure:allure-gradle:2.8.1'
+        classpath 'org.sonarsource.scanner.gradle:sonarqube-gradle-plugin:2.8'
+    }
+}
+
+
+apply from: 'environment.gradle'
+apply from: 'dependencies.gradle'
+
+
+// ----- variables -------------------------------------------------------------
+
+def XXX_BASENAME    = '<base_name>'
+def XXX_API_VERSION = '1.0.0'
+
+def ALLURE_VERSION = '2.7.0'
+def ALLURE_SPOCK_VERSION = '2.13.0'
+
+
+// ----- project definitions ---------------------------------------------------
+
+project.ext.compilerOptions = [
+    sourceCompatibility: 8,
+    targetCompatibility: 8,
+    defaultEncoding:     'UTF-8',
+]
+
+
+project.ext.baseName = XXX_BASENAME
+project.version      = XXX_API_VERSION
+
+
+allprojects {
+    apply from: "${rootDir}/utilities.gradle"
+
+    repositories {
+        mavenCentral()
+        jcenter()
+    }
+}
+
+
+subprojects {
+    if (isJavaProject(project)) {
+        // core plugins
+        apply plugin: 'java-library'
+        apply plugin: 'jacoco'
+        apply plugin: 'pmd'
+        apply plugin: 'eclipse'
+
+        // 3rd-party plugins
+        apply plugin: 'com.github.spotbugs'
+        apply plugin: 'io.qameta.allure'
+
+
+        sourceCompatibility = project.compilerOptions.sourceCompatibility
+        targetCompatibility = project.compilerOptions.targetCompatibility
+        tasks.withType(AbstractCompile)*.options*.encoding = project.compilerOptions.defaultEncoding
+
+
+        configurations {
+            testOutput {
+                extendsFrom testImplementation
+            }
+
+            packagingOnly {
+                extendsFrom implementation
+            }
+
+            allureTestImplementation {
+                extendsFrom compileClasspath
+                extendsFrom runtimeClasspath
+                extendsFrom testCompileClasspath
+                extendsFrom testRuntimeClasspath
+            }
+        }
+
+
+        dependencies {
+            testOutput sourceSets.test.output
+        }
+
+
+        test {
+            ignoreFailures = true
+        }
+
+
+        jacocoTestReport {
+            reports {
+                xml.enabled  = true
+                html.destination file("${buildDir}/reports/jacoco")
+            }
+        }
+        jacocoTestReport.dependsOn test
+
+
+        pmd {
+            consoleOutput  = false
+            ignoreFailures = true
+
+            ruleSets = [
+                'category/java/bestpractices.xml',  // good practices which should be followed
+                'category/java/errorprone.xml',     // bad practices which should be avoided
+                'category/java/codestyle.xml',      // regarding Coding Style
+                'category/java/multithreading.xml', // regarding Multi-Threading
+                'category/java/performance.xml',    // problems performance downgrade
+                'category/java/design.xml',         // flag suboptimal code implementations
+                'category/java/documentation.xml',  // document rules which should be followed
+                'category/java/security.xml',       // guidelines about secure coding
+            ]
+        }
+
+
+        tasks.withType(com.github.spotbugs.SpotBugsTask) {
+            ignoreFailures = true
+
+            // Only one can be used(exclusive option).
+            // As default, XML is enable since it will be used 3rd parties like Jenkins
+            reports.xml.enabled  = true
+            reports.html.enabled = false
+        }
+
+
+        jar {
+            archiveBaseName = rootProject.baseName
+            archiveVersion  = rootProject.version
+        }
+
+
+        allure {
+            version = ALLURE_VERSION
+            useSpock {
+                version = ALLURE_SPOCK_VERSION
+            }
+            configuration = 'allureTestImplementation'
+        }
+
+
+        sourceSets {
+            allureTest {
+                java.srcDirs      += ['src/main/java',      'src/test/java']
+                resources.srcDirs += ['src/main/resources', 'src/test/resources']
+
+                compileClasspath += main.output + test.output
+                runtimeClasspath += main.output + test.output
+            }
+        }
+        task allureTest(type: Test) {
+            testClassesDirs = sourceSets.allureTest.output.classesDirs
+            classpath       = sourceSets.allureTest.runtimeClasspath
+
+            ignoreFailures = true
+        }
+        project.afterEvaluate {
+            allureReport.dependsOn allureTest
+        }
+    }
+
+
+    if (isGroovyProject(project)) {
+        apply plugin: 'groovy'
+        apply plugin: 'io.qameta.allure'
+        tasks.withType(GroovyCompile)*.options*.encoding = project.compilerOptions.defaultEncoding
+
+        sourceSets {
+            allureTest {
+                groovy.srcDirs += ['src/main/groovy', 'src/test/groovy']
+
+                compileClasspath += main.output + test.output
+                runtimeClasspath += main.output + test.output
+            }
+        }
+
+        if (project.plugins.hasPlugin('eclipse')) {
+            eclipse {
+                project {
+                    file {
+                        withXml {
+                            def node = it.asNode()
+                            node.appendNode('classpathentry', [exported: "true", kind: "con", path: "GROOVY_SUPPORT"])
+                            node.appendNode('classpathentry', [exported: "true", kind: "con", path: "GROOVY_DSL_SUPPORT"])
+                        }
+                    }
+
+                    natures += ['org.eclipse.jdt.groovy.core.groovyNature']
+                }
+            }
+        }
+    }
+}
+
+
+// ----- plugins configurations ------------------------------------------------
+
+// ==== base ====
+apply plugin: 'base'
+clean.doLast {
+    delete "${project.rootDir}/build"
+}
+
+
+task mavenClean(type: Exec) {
+    workingDir project.rootDir
+
+    crossPFcommand 'mvnw'
+
+    args += [
+        // options
+
+        // goals
+    ]
+}
+
+
+// ==== JUnit report & Javadoc ====
+apply plugin: 'java'
+
+task allReport(type: TestReport) {
+    destinationDir = file("${rootProject.buildDir}/reports/allTests")
+
+    reportOn allTasksBy('test')
+}
+
+task allJavadoc(type: Javadoc) {
+    def javaProjects = subprojects.findAll { isJavaProject(it) }
+
+    source javaProjects*.sourceSets.main.allJava
+
+    options.tags(
+        'apiNote:a:API Note:',
+        'implSpec:a:Implementation Requirements:',
+        'implNote:a:Implementation Note:',
+    )
+    // options.jFlags(
+    //     '-DproxyHost=<your_proxyhost>',
+    //     '-DproxyPort=<your_proxyport>',
+    // )
+    options.links(
+        'https://docs.oracle.com/javase/8/docs/api/',
+        'https://docs.oracle.com/javaee/7/api/',
+        // others
+    )
+
+    options.encoding project.compilerOptions.defaultEncoding
+
+    failOnError false
+
+    classpath += files(javaProjects*.sourceSets.main.compileClasspath)
+}
+
+
+// ==== Jacoco ====
+apply plugin: 'jacoco'
+
+def allJacocoReportDir       = "${rootProject.buildDir}/reports/jacoco"
+def allJacocoConverageReport = "${allJacocoReportDir}/report.xml"
+
+task jacocoAllReport(type: JacocoReport) {
+    dependsOn allTasksBy('test')
+
+    def javaProjects = subprojects.findAll { isJavaProject(it) }
+    additionalSourceDirs.from files(javaProjects*.sourceSets.main.allSource.srcDirs)
+    sourceDirectories.from    files(javaProjects*.sourceSets.main.allSource.srcDirs)
+    classDirectories.from     files(javaProjects*.sourceSets.main.output)
+
+    executionData.from project.fileTree(dir: '.', include:'**/build/jacoco/test.exec')
+
+    reports {
+        html.enabled = true
+        xml.enabled  = true
+        csv.enabled  = false
+
+        html.destination file(allJacocoReportDir)
+        xml.destination  file(allJacocoConverageReport)
+    }
+}
+
+
+// ==== sonarqube ====
+apply plugin: 'org.sonarqube'
+
+sonarqube {
+    properties {
+        property 'sonar.host.url',           "${project.config.sonar.host.url}"
+
+        property 'sonar.projectKey',         '<your_key>'
+        property 'sonar.projectName',        '<your_name>'
+        property 'sonar.projectVersion',     "${project.version}"
+
+        property 'sonar.projectDescription', """|<your description>
+                                                |""".stripMargin()
+
+        // sonarqube plugins
+        property 'sonar.coverage.jacoco.xmlReportPaths', allJacocoConverageReport
+    }
+}
+
+
+// ==== Allure framework ====
+apply plugin: 'io.qameta.allure'
+
+allure {
+    version = ALLURE_VERSION
+}
+
+import io.qameta.allure.gradle.task.AllureReport
+task allureAllReport(type: AllureReport) {
+    dependsOn allTasksBy('allureTest')
+
+    resultsDirs = projectsHasPlugin('io.qameta.allure').allure.resultsDir
+}
